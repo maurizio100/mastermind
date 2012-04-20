@@ -1,0 +1,16 @@
+Client part
+-------------------------------------------------
+1. analyse feedback from server
+2. commenting where neccessary
+3. Look for error handling stuff
+4. Routine for free ressources
+================If everything is ok==============
+5. upload version to server
+6. Strategy for mastermind
+
+Server part
+-------------------------------------------------
+1. go through the code and see if there should be
+additional commentary or errorhandling
+
+
