@@ -24,24 +24,20 @@ Includes and Constants
 #define EXIT_GAME_LOST (3)
 #define EXIT_MULTIPLE_ERRORS (4)
 
-#define MAXROUNDS (35)
-#define SLOTS (5)
 #define SENDBYTES (2)
 #define READBYTES (1)
-#define MSGSIZE (15)
-/****************************************
-Makros
-*****************************************/
-#define COUNT_OF(x) (sizeof(x)/sizeof(x[0]))
+
+#define SLOTS (5)
+#define COLORS (8)
 /****************************************
 Type Definitions
 ****************************************/
+/* stores the connection information */
 struct opts{
   char *portno;
   char *serverhost;
 };
-
-/*static enum { beige, darkblue, green, orange, red, black, violet, white }; for later */
+typedef enum{FALSE, TRUE} bool;
 /*************************************
 Global variables
 *************************************/
@@ -68,12 +64,20 @@ static void parse_args(int argc, char **argv, struct opts *options);
  */
 static int connect_to_socket( const struct opts *options );
 /**
- * @brief creates a tipp for the mastermind server
- * @param puts the color tipp in the colstring
- * @param number of slots available on the mastermind board
+ * @brief converts the message to a sendable bitcode
+ * @param colstring the chosen colors
+ * @param slots the amount of colors 
  */
-static void create_colorstring(char *colstring, int slots);
-static uint16_t create_message( const char *colstring, int slots );
+static void create_message( const char *colstring, uint8_t *buf, int slots );
+/**
+ * @brief evaluates bit 7 and 6 of server's answer
+ * @param buf the buffer where read message is in
+ * @return void because it exits program when an error occurs
+ */
+static void evaluate_errors( const uint8_t *buf );
+/**
+ * @brief frees all used ressources
+ */
 static void free_ressources(void);
 
 /****************************************
@@ -94,41 +98,111 @@ static void bailout(int errnumber, const char *errmessage);
  */
 static void printerror(const char* errmessage);
 /**************************************
-Functionpointer and operations
-**************************************/
-
-/**************************************
 Main Procedure
 **************************************/
 int main(int argc, char **argv){
-  /* variables */
+  /******** variables **********/
   struct opts options;
-  int round = 0;
-  /*  ssize_t ret = 0; */
-
-  char colstring[SLOTS];
-  uint16_t codedstring;
+  ssize_t ret = 0;
   static uint8_t buffer[SENDBYTES];
 
+  /* array that keeps all colors appeared in the code */
+  static char clrstring[SLOTS];
+  static const char colors[] = {'b','d','g','o','r','s','v','w'};
+
+  /* flag array that says which pins are on right position */
+  static bool fixed[] = {FALSE, FALSE, FALSE, FALSE, FALSE};
+  static char guess[SLOTS];
+
+  int clr = 0, round = 0, clrfound = 0;
+  int i = 0, j = 0, clr_occ = 1;
+  int reds = 0,  whites = 0, curr_red = 0, curr_white = 0 ;
+  char clr_wrong = ' ';
+  /******** initialization **********/
   /* arguments check */
   (void) parse_args(argc, argv, &options);
-  sockfd = connect_to_socket( &options );
-
+  /******socket*********************/
+  if((sockfd = connect_to_socket( &options )) < 0){
+    bailout(EXIT_FAILURE, "main No socket created");
+  }
+ 
   /* game start */
-  for(round = 1; round <= MAXROUNDS; ++round){
-  /* -- create colorstring */
-    create_colorstring(&colstring[0], SLOTS);
-  /* -- prepare for sending (parity) */
-    codedstring = create_message( &colstring[0], SLOTS);
-    buffer[0] = (uint8_t)codedstring & 0xff;
-    buffer[1] = (uint8_t)((codedstring >> 8) & 0xff);
-  /* -- send the string */
-    write( sockfd, &buffer[0], SENDBYTES );
-  /* -- evaluation of answer*/
-  /*  ret = read(sockfd, &buffer[0], READBYTES ); */
+  /** first pick up all colors available in the mastermind code **/
+  for(clr=0; (clrfound < SLOTS) &&  (clr < COLORS); ++clr){
+    round++;
+
+    for(i = clrfound; i < SLOTS; ++i){
+      clrstring[i] = colors[clr];
+    }
+    (void)create_message( &clrstring[0], &buffer[0], SLOTS);
+    
+    if( (ret = write( sockfd, &buffer[0], SENDBYTES)) < 0 ){
+      bailout(EXIT_FAILURE, "main Could not write data");
+    }
+    if( (ret = read(sockfd, &buffer[0], READBYTES )) < 0 ){
+      bailout(EXIT_FAILURE, "main Could not read data");
+    }
+
+    (void)evaluate_errors( &buffer[0] );
+    
+    reds = buffer[0] & 0x7;
+    whites = (buffer[0] >> 3) & 0x7; 
+
+    /* when feedback pins are in sum more than before a color is found */
+    if((reds+whites) > (curr_red + curr_white)){
+      clrfound += ((reds+whites)-(curr_red+curr_white));
+    }else{ clr_wrong = colors[clr]; }
+    
+    curr_red = reds;
+    curr_white = whites;
 
   }
+  /** after that loop all colors are found **/
+  curr_red = 0;
+	if(clr_wrong == ' ' ){ clr_wrong = colors[COLORS-1]; }
+  /** now lets see where those colors are placed in the code **/
+  if(reds < 5 ){
+    for( i = 0; i < SLOTS; ++i ){ guess[i] = clr_wrong; }
+
+    for(i = 0; i < SLOTS; ++i){
+      if( i != SLOTS -1 ){
+	/* goes to the last equivalent color and also increments its occurence */
+	if( clrstring[i] == clrstring[i+1] ){ ++clr_occ; continue; }
+      }
+
+      for( j = 0; clr_occ > 0; ++j ){
+	if( fixed[j] == FALSE ){
+	  round++;
+	  guess[j] = clrstring[i];
+
+	  (void)create_message( &guess[0], &buffer[0], SLOTS);
+    
+	  if( (ret = write( sockfd, &buffer[0], SENDBYTES)) < 0 ){
+	    bailout(EXIT_FAILURE, "main Could not write data");
+	  }
+	  if( (ret = read(sockfd, &buffer[0], READBYTES )) < 0 ){
+	    bailout(EXIT_FAILURE, "main Could not read data");
+	  }
+	  (void)evaluate_errors( &buffer[0] );
+    
+	  reds = buffer[0] & 0x7;
+	  if( reds > curr_red  ){
+	    /* with every correct placed color its amount occurence decreases */ 
+	    --clr_occ;
+	    fixed[j] = TRUE;
+	    guess[j] = clrstring[i];
+	    curr_red++;
+	  }else{
+	    guess[j] = clr_wrong;
+	  }
+	}
+      }
+
+      clr_occ = 1;
+    }
+  }
   /**********clearing and exit***************/
+  printf("Runden: %d\n", round);
   free_ressources();
   exit(EXIT_SUCCESS);
 }
@@ -148,24 +222,24 @@ static void parse_args(int argc, char **argv, struct opts *options){
   srvport = argv[2];
 
   errno = 0;
-  /*TODO check servername for correctness*/
   options->serverhost = srvname;
+
   port = strtol(srvport, &endptr, 10);
   if(( errno == ERANGE && (port == LONG_MAX || port == LONG_MIN))
      || (errno != 0 && port == 0)){
-    bailout(EXIT_FAILURE, "strtol");
+    bailout(EXIT_FAILURE, "parse_args strtol");
   }
 
   if(endptr == srvport){
-    bailout(EXIT_FAILURE, "No digits were found");
+    bailout(EXIT_FAILURE, "parse_args No digits were found");
   }
 
   if(*endptr != '\0'){
-    bailout(EXIT_FAILURE, "Further characters after <server-port>");
+    bailout(EXIT_FAILURE, "parse_args Further characters after <server-port>");
   }
 
   if(port < 1 || port > 65535){
-    bailout(EXIT_FAILURE, "Not a valid port number. Use (1-65535)");
+    bailout(EXIT_FAILURE, "parse_args Not a valid port number. Use (1-65535)");
   }
 
   options->portno = srvport;
@@ -188,34 +262,28 @@ static int connect_to_socket(const struct opts *options){
   hints.ai_next = NULL;
 
   if((getaddrinfo(host, port, &hints, &ai)) != 0){
-    (void)bailout(EXIT_FAILURE, "getaddrinfo");
+    (void)bailout(EXIT_FAILURE, "connect_to_socket getaddrinfo");
   } 
 
   if(ai == NULL){
-    (void)bailout(EXIT_FAILURE, "Could not resolve host.");
+    (void)bailout(EXIT_FAILURE, "connect_to_socket Could not resolve host.");
   }
  
   if((descriptor = socket( ai->ai_family, ai->ai_socktype, ai->ai_protocol)) < 0){
-    (void)bailout(EXIT_FAILURE, "Socket creation failed");
+    (void)bailout(EXIT_FAILURE, "connect_to_socket Socket creation failed");
   }
 
   if(connect(descriptor, ai->ai_addr, ai->ai_addrlen) < 0){
     (void) close(descriptor);
-    bailout(EXIT_FAILURE, "Connection failed");
+    bailout(EXIT_FAILURE, "connect_to_socket Connection failed");
   }
   
   freeaddrinfo(ai);
   ai = 0;
   return descriptor;
 }
-static void create_colorstring(char *colstring, int slots){
-  int i;
-  for(i = 0; i < slots; ++i){
-    colstring[i] = 'w';
-  }
-  /* more to come here */
-}
-static uint16_t create_message(const char *colstring, int slots){
+
+static void create_message(const char *colstring, uint8_t *buf, int slots){
   uint16_t msg = 0;
   uint8_t paritycalc = 0;
   enum color{ beige = 0, darkblue, green, orange, red, black, violet, white };
@@ -240,7 +308,8 @@ static uint16_t create_message(const char *colstring, int slots){
   }
   paritycalc &= 0x1;
   msg |= (paritycalc << 15);
-  return msg;
+  buf[0] = (uint8_t)msg & 0xff;
+  buf[1] = (uint8_t)((msg >> 8) & 0xff);
 
 } 
 /************************************
@@ -266,6 +335,21 @@ static void printerror(const char *errmessage){
     (void) fprintf(stderr, "%s: %s\n", prgname, errmessage);
   }
 }
+static void evaluate_errors( const uint8_t *buf ){
+    int parity = (buf[0] >> PARITY_ERR_BIT) & 0x1;
+    int gamelost = (buf[0] >> GAME_LOST_ERR_BIT) & 0x1;
+
+    if( parity > 0 && gamelost > 0 ){
+      bailout(EXIT_MULTIPLE_ERRORS,"Parity error\nGame lost");
+    }
+    if( parity > 0 ){
+      bailout(EXIT_PARITY_ERROR, "Parity error");
+    }
+    if( gamelost > 0 ){
+      bailout(EXIT_GAME_LOST, "Game lost");
+    }
+
+}
 static void free_ressources(void){
 
   if( ai != 0 ){
@@ -273,4 +357,10 @@ static void free_ressources(void){
     ai = NULL;
   }   
 
+  if(sockfd > -1 ){
+    if( (close(sockfd)) < 0 ){
+      printerror("free_ressources Could not close socket");
+    }
+    sockfd = -1;
+  }
 }
